@@ -1,0 +1,142 @@
+#!/bin/bash
+# Custom Lynis Security Audits
+# CUST-3001: Password Aging Policy
+# CUST-3002: Critical File Permissions
+
+if [ "${SKIPTEST:-0}" -eq 0 ]; then
+    Register --test-no CUST-3001 --weight L --network NO --category security --description "Password Aging Policy Audit"
+    Register --test-no CUST-3002 --weight L --network NO --category security --description "Critical File Permissions Audit"
+
+    cust_pass() {
+        echo "[PASS] $1"
+        LogText "Custom audit PASS: $1"
+        PASS_COUNT=$((PASS_COUNT + 1))
+    }
+    cust_warn() {
+        echo "[WARNING] $1"
+        LogText "Custom audit WARNING: $1"
+        WARN_COUNT=$((WARN_COUNT + 1))
+    }
+    cust_fail() {
+        echo "[FAIL] $1"
+        LogText "Custom audit FAIL: $1"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    }
+    cust_summary() {
+        echo
+        echo "Audit Summary"
+        echo "Passed   : $PASS_COUNT"
+        echo "Warnings : $WARN_COUNT"
+        echo "Failed   : $FAIL_COUNT"
+    }
+
+    echo
+    echo "########################################"
+    echo " CUSTOM LYNIS TEST: PASSWORD AGING AUDIT"
+    echo " TEST ID: CUST-3001"
+    echo "########################################"
+    PASS_COUNT=0
+    WARN_COUNT=0
+    FAIL_COUNT=0
+
+    if [ -r /etc/login.defs ]; then
+        for KEY in PASS_MIN_DAYS PASS_MAX_DAYS PASS_WARN_AGE; do
+            VALUE=$(awk -v key="$KEY" '$1 == key {print $2; exit}' /etc/login.defs)
+            echo
+            echo "$KEY : ${VALUE:-Not configured}"
+
+            case "$VALUE" in
+                ''|*[!0-9]*)
+                    cust_warn "$KEY is missing or is not numeric."
+                    ;;
+                *)
+                    case "$KEY" in
+                        PASS_MIN_DAYS)
+                            if [ "$VALUE" -ge 1 ]; then
+                                cust_pass "Minimum password age is $VALUE day(s)."
+                            else
+                                cust_warn "Set PASS_MIN_DAYS to at least 1."
+                            fi
+                            ;;
+                        PASS_MAX_DAYS)
+                            if [ "$VALUE" -ge 1 ] && [ "$VALUE" -le 365 ]; then
+                                cust_pass "Maximum password age is $VALUE days."
+                            else
+                                cust_warn "Review PASS_MAX_DAYS; current value is $VALUE."
+                            fi
+                            ;;
+                        PASS_WARN_AGE)
+                            if [ "$VALUE" -ge 7 ]; then
+                                cust_pass "Password expiry warning is $VALUE days."
+                            else
+                                cust_warn "Set PASS_WARN_AGE to at least 7 days."
+                            fi
+                            ;;
+                    esac
+                    ;;
+            esac
+        done
+    else
+        cust_fail "/etc/login.defs is missing or unreadable."
+    fi
+
+    cust_summary
+
+    echo
+    echo "########################################"
+    echo " CUSTOM LYNIS TEST: FILE PERMISSIONS"
+    echo " TEST ID: CUST-3002"
+    echo "########################################"
+    PASS_COUNT=0
+    WARN_COUNT=0
+    FAIL_COUNT=0
+
+    for FILE in /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers; do
+        echo
+        echo "Checking: $FILE"
+
+        if [ ! -e "$FILE" ]; then
+            cust_fail "$FILE does not exist."
+            continue
+        fi
+
+        OWNER=$(stat -c '%U' "$FILE" 2>/dev/null)
+        MODE=$(stat -c '%a' "$FILE" 2>/dev/null)
+        PERMS=$(stat -c '%A' "$FILE" 2>/dev/null)
+        echo "Owner: $OWNER | Mode: $MODE ($PERMS)"
+
+        if [ "$OWNER" != "root" ]; then
+            cust_fail "$FILE is not owned by root."
+            continue
+        fi
+
+        MODE_NUM=$((8#$MODE))
+
+        case "$FILE" in
+            /etc/passwd|/etc/group)
+                if (( (MODE_NUM & 022) == 0 )); then
+                    cust_pass "$FILE is root-owned and not group/world writable."
+                else
+                    cust_fail "$FILE has group/world write permissions."
+                fi
+                ;;
+            /etc/shadow|/etc/gshadow)
+                if (( (MODE_NUM & 077) == 0 )); then
+                    cust_pass "$FILE is root-owned with no group/other permissions."
+                else
+                    cust_fail "$FILE grants permissions to group or others."
+                fi
+                ;;
+            /etc/sudoers)
+                if (( (MODE_NUM & 027) == 0 )); then
+                    cust_pass "$FILE is root-owned with restricted permissions."
+                else
+                    cust_fail "$FILE has overly broad permissions."
+                fi
+                ;;
+        esac
+    done
+
+    cust_summary
+    echo
+    echo "Custom security audits completed."
